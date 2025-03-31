@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: angular-miyembro
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: angular-miyembro
+  template:
+    metadata:
+      labels:
+        app: angular-miyembro
+    spec:
+      containers:
+        - name: angular-miyembro
+          image: arjayfuentes24/angular-miyembro:latest
+          ports:
+            - containerPort: 80
+          env:
+            - name: API_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: angular-config
+                  key: API_URL

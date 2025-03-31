@@ -1,0 +1,168 @@
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:latest
+    networks:
+      - miyembro-network
+    configs:
+      - source: miyembro_nginx_config
+        target: /etc/nginx/nginx.conf
+    volumes:
+      - /etc/letsencrypt/live/miyembro.net:/etc/letsencrypt/live/miyembro.net:ro
+      - /etc/letsencrypt/archive/miyembro.net:/etc/letsencrypt/archive/miyembro.net:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  jenkins:
+    image: arjayfuentes24/miyembro-jenkins-docker-swarm:latest
+    networks:
+      - miyembro-network
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins-data:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    privileged: true
+
+  config-server:
+    image: arjayfuentes24/config-server-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+    environment:
+      - SPRING_CLOUD_CONFIG_SERVER_NATIVE_SEARCHLOCATIONS=file:///app/configurations/
+    ports:
+      - "8888:8888"
+
+  discovery-service:
+    image: arjayfuentes24/discovery-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8761:8761"
+    depends_on:
+      - config-server
+      - zipkin
+
+  member-service:
+    image: arjayfuentes24/member-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8050:8050"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  organization-service:
+    image: arjayfuentes24/organization-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8090:8090"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  gateway-service:
+    image: arjayfuentes24/gateway-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8222:8222"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  zipkin:
+    image: openzipkin/zipkin:latest
+    networks:
+      - miyembro-network
+    ports:
+      - "9411:9411"
+    deploy:
+      replicas: 1
+
+  angular-app:
+    image: arjayfuentes24/angular-miyembro:latest
+    networks:
+      - miyembro-network
+    #    ports:
+    #     - "8081:80"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - API_URL=http://gateway-service:8222
+    depends_on:
+      - gateway-service
+
+volumes:
+  jenkins-data:
+    driver: local
+  certs:
+    driver: local
+
+networks:
+  miyembro-network:
+    driver: overlay
+    external: true
+
+configs:
+  miyembro_nginx_config:
+    file: /etc/nginx/nginx.conf

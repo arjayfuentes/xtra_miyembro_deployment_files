@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+spec:
+  selector:
+    matchLabels:
+      app: mongodb
+  replicas: 1
+  template: #template for the pods
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:3.6.5-jessie
+          volumeMounts:
+            - name: mongo-persistent-storage
+              mountPath: /data/db
+      volumes:
+        - name: mongo-persistent-storage
+
+          #below code is transferred to storage.yaml
+          #  hostPath:
+          #    path: /mnt/some/directory/structure/
+          #    type: DirectoryOrCreate
+
+          # pointer to the configuration of HOW we want the mount to be implemented
+          persistentVolumeClaim:
+            claimName: mongo-pvc #this is the same name in storage.yaml
+
+
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fleetman-mongodb #this is the host name in the applicaiton-production-microservice.properties. (eg. spring.data.mongodb.host=fleetman-mongodb.default.svc.cluster.local)
+
+spec:
+  selector:
+    app: mongodb
+
+  ports:
+    - name: mongoport
+      port: 27017
+
+  type: ClusterIP

@@ -1,0 +1,30 @@
+FROM jenkins/jenkins:jdk21
+
+# Switch to root for installation
+USER root
+
+# Install Docker CLI and compose-plugin (not the full Docker Engine)
+RUN curl -fsSL https://get.docker.com | sh && \
+    apt-get install -y docker-compose-plugin && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Jenkins plugins (removed Kubernetes plugins if not needed)
+RUN jenkins-plugin-cli --plugins \
+    workflow-aggregator \
+    ws-cleanup \
+    docker-workflow \
+    docker-plugin \
+    ssh-credentials \
+    git \
+    pipeline-utility-steps
+
+# Configure Docker to use host's socket
+RUN usermod -aG docker jenkins && \
+    mkdir -p /var/jenkins_home && \
+    chown -R jenkins:jenkins /var/jenkins_home
+
+# Switch back to Jenkins user
+USER jenkins
+
+# Pre-configure Jenkins to use host Docker
+ENV DOCKER_HOST=unix:///var/run/docker.sock
