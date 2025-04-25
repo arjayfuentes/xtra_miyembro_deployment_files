@@ -1,0 +1,331 @@
+version: '3.8'
+
+services:
+  nginx:
+    image: nginx:latest
+    networks:
+      - miyembro-network
+    configs:
+      - source: miyembro_nginx_config
+        target: /etc/nginx/nginx.conf
+    volumes:
+      - /etc/letsencrypt/live/miyembro.net:/etc/letsencrypt/live/miyembro.net:ro
+      - /etc/letsencrypt/archive/miyembro.net:/etc/letsencrypt/archive/miyembro.net:ro
+      - /etc/nginx-secure/jenkins.htpasswd:/etc/nginx/jenkins.htpasswd:ro
+      - /etc/nginx-secure/zipkin.htpasswd:/etc/nginx/zipkin.htpasswd:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+  mongodb:
+    image: mongo:latest
+    networks:
+      - miyembro-network
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: arjay
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongodb_password
+      MONGO_INITDB_DATABASE: organization
+    volumes:
+      - mongodb-data:/data/db
+    ports:
+      - "27017:27017"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [ node.role == manager ]
+      resources:
+        limits:
+          memory: 1G
+    secrets:
+      - mongodb_password
+
+  postgres-master:
+    image: postgres:16-alpine
+    networks:
+      - miyembro-network
+    environment:
+      POSTGRES_DB: member
+      POSTGRES_USER: arjay
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_EXTRA_FLAGS: -c max_connections=300
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+    secrets:
+      - postgres_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arjay -d member"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter
+    networks:
+      - miyembro-network
+    environment:
+      DATA_SOURCE_NAME: "postgresql://arjay:Miyembro24122022@postgres-master:5432/member?sslmode=disable"
+    deploy:
+      mode: global
+    ports:
+      - "9187:9187"
+
+  jenkins:
+    image: arjayfuentes24/miyembro-jenkins-docker-swarm:latest
+    networks:
+      - miyembro-network
+    volumes:
+      - jenkins-prod-data:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/jenkins-secure/security.groovy:/usr/share/jenkins/ref/init.groovy.d/security.groovy:ro
+    ports:
+      - "50000:50000"
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 2G
+    environment:
+      - JAVA_OPTS=-Djenkins.install.runSetupWizard=false
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    privileged: true
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:latest
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_SERVER_ID: 1
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "22181:2181"
+    networks:
+      - miyembro-network
+
+  kafka:
+    image: confluentinc/cp-kafka:latest
+    container_name: ms_kafka
+    ports:
+      - "9092:9092"
+    expose:
+      - "29092"
+    depends_on:
+      - zookeeper
+    environment:
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+    networks:
+      - miyembro-network
+
+  kafdrop:
+    image: obsidiandynamics/kafdrop
+    ports:
+      - "9000:9000"
+    environment:
+      KAFKA_BROKERCONNECT: "kafka:29092"
+    depends_on:
+      - kafka
+    networks:
+      - miyembro-network
+
+  config-server:
+    image: arjayfuentes24/config-server-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+    environment:
+      - SPRING_CLOUD_CONFIG_SERVER_NATIVE_SEARCHLOCATIONS=file:///app/configurations/
+    ports:
+      - "8888:8888"
+
+  discovery-service:
+    image: arjayfuentes24/discovery-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8761:8761"
+    depends_on:
+      - config-server
+      - zipkin
+
+  email-service:
+    image: arjayfuentes24/email-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8060:8060"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  member-service:
+    image: arjayfuentes24/member-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8050:8050"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  event-service:
+    image: arjayfuentes24/event-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8070:8070"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  organization-service:
+    image: arjayfuentes24/organization-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8090:8090"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  gateway-service:
+    image: arjayfuentes24/gateway-miyembro:latest
+    networks:
+      - miyembro-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - SPRING_PROFILES_ACTIVE=prod
+      - EUREKA_CLIENT_SERVICEURL_DEFAULTZONE=http://discovery-service:8761/eureka/
+      - SPRING_CONFIG_IMPORT=configserver:http://config-server:8888
+    ports:
+      - "8222:8222"
+    depends_on:
+      - config-server
+      - discovery-service
+      - zipkin
+
+  zipkin:
+    image: openzipkin/zipkin:latest
+    networks:
+      - miyembro-network
+    ports:
+      - "9411:9411"
+    deploy:
+      replicas: 1
+
+  angular-app:
+    image: arjayfuentes24/angular-miyembro:latest
+    networks:
+      - miyembro-network
+    #    ports:
+    #     - "8081:80"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+    environment:
+      - API_URL=http://gateway-service:8222
+    depends_on:
+      - gateway-service
+
+volumes:
+  jenkins-prod-data:
+    driver: local
+  certs:
+    driver: local
+  postgres-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/postgres-data
+  mongodb-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /mnt/mongodb-data
+
+networks:
+  miyembro-network:
+    driver: overlay
+    external: true
+
+configs:
+  miyembro_nginx_config:
+    file: /etc/nginx/nginx.conf
+
+secrets:
+  postgres_password:
+    external: true
+  mongodb_password:
+    external: true
